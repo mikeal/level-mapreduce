@@ -5,6 +5,7 @@ var events = require('events')
   , util = require('util')
   , events = require('events')
   , sleepref = require('sleep-ref')
+  , levelup = require('levelup')
   , noop = function () {}
   ;
 
@@ -79,6 +80,7 @@ Query.prototype.init = function (stream) {
 }
 
 function Index (lev, name, map, opts) {
+  if (typeof lev === 'string') lev = levelup(lev, {keyEncoding:'binary', valueEncoding:'json'})
   this.mutex = mutex(lev)
   this.name = name
   this.map = map
@@ -127,7 +129,7 @@ Index.prototype.get = function (key, opts, cb) {
   //   }
   self.mutex.lev.createReadStream()
 }
-Index.prototype.write = function (entry, ref, cb) {
+Index.prototype.write = function (entry, ref, tuples, cb) {
   var self = this
     , id = self.opts.id(entry)
     ;
@@ -137,9 +139,8 @@ Index.prototype.write = function (entry, ref, cb) {
   }
 
   function writeall () {
-    var tuples = self.map(entry)
-      , inserts = tuples.map(function (t) { return [['index', [t[0]], uuid()], t[1]] })
-      ;
+    var inserts = tuples.map(function (t) { return [['index', [t[0]], uuid()], t[1]] })
+
     inserts.forEach(function (i) {
       self.mutex.put(self.bytes.encode(i[0]), i[1], noop)
     })
@@ -165,14 +166,13 @@ Index.prototype.write = function (entry, ref, cb) {
   })
 }
 Index.prototype.pull = function (url, cb) {
-  var s = sleepref.client(url)
-  this._pull(s)
-  s.on('end', cb)
+  var s = sleepref.client(url, {include_data:true})
+  this._pull(s, url, cb)
 }
 Index.prototype._pull = function (sleeper, ref, cb) {
   var self = this
   sleeper.on('entry', function (entry) {
-    self.write(entry, ref, function (e, tuples) {
+    self.write(entry, ref, self.map(entry), function (e, tuples) {
       if (e) return sleeper.end()
     })
   })
@@ -198,5 +198,39 @@ Index.prototype.from = function (getSequences, name, cb) {
   }
 }
 
-module.exports = function (lev, name, map, opts) { return new Index(lev, name, map, opts) }
+function AsyncIndex () {
+  Index.apply(this, arguments)
+}
+util.inherits(AsyncIndex, Index)
+AsyncIndex.prototype.from = function (nextSequence, name, cb) {
+  var self = this
+  if (!cb) {
+    cb = name
+    name = null
+  }
 
+  function _do (seq) {
+    nextSequence({include_data:true, since:seq}, function (e, entry) {
+      if (e) return cb(null)
+      self.map(entry, function (e, tuples) {
+        if (e) console.error(e)
+        self.write(entry, name, tuples, function (e) {
+          if (e) console.error(e)
+          _do(seq+1)
+        })
+      })
+    })
+  }
+  if (!name) {
+    _do(0)
+  } else {
+    self.mutex.get(self.bytes.encode(['seq', name]), function (e, seq) {
+      if (e) seq = 0
+      _do(seq)
+    })
+  }
+}
+
+
+module.exports = function (lev, name, map, opts) { return new Index(lev, name, map, opts) }
+module.exports.async = function (lev, name, map, opts) {return new AsyncIndex(lev, name, map, opts) }
