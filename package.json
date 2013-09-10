@@ -1,6 +1,6 @@
 {
   "name": "sleep-mapreduce",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Stored map engine for any SLEEP feed w/ map and reduce query API.",
   "main": "index.js",
   "dependencies": {
