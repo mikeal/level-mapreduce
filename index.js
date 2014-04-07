@@ -4,233 +4,162 @@ var events = require('events')
   , byteslice = require('byteslice')
   , util = require('util')
   , events = require('events')
-  , sleepref = require('sleep-ref')
   , levelup = require('levelup')
+  , stream = require('stream')
+  , once = require('once')
   , noop = function () {}
   ;
 
 function BaseQuery () {}
-util.inherits(BaseQuery, events.EventEmitter)
+util.inherits(BaseQuery, stream.Transform)
 BaseQuery.prototype.map = function (func) {
-  var q = new BaseQuery()
-    , self = this
-    ;
-  self.on('row', function (row) {
-    q.emit('row', func(row))
-  })
-  self.on('end', q.end.bind(q))
-  self.on('error', q.emit.bind(q, 'error'))
-  return q
 }
 BaseQuery.prototype.filter = function (func) {
-  var q = new BaseQuery()
-    , self = this
-    ;
-  self.on('row', function (row) {
-    if (func(row)) q.emit('row', row)
-  })
-  self.on('end', q.end.bind(q))
-  self.on('error', q.emit.bind(q, 'error'))
-  return q
 }
 BaseQuery.prototype.reduce = function (func, cb, last) {
-  var self = this
-  self.on('row', function (row) {
-    last = func(last, row)
-  })
-  self.on('end', function () {
-    cb(null, last)
-  })
 }
-BaseQuery.prototype.end = function () {
-  this.emit('end')
-}
-
 
 function Query (index, opts, cb) {
   var self = this
-  index.mutex.afterWrite(function () {
-    self.init(index.mutex.lev.createReadStream(opts))
-  })
-  this.count = 0
-  this.index = index
-  if (cb) {
-    var results = []
-    this.on('row', function (r) {
-      results.push(r)
-    })
-    this.on('end', function () {
-      cb(null, results)
-    })
-    this.on('error', function (e) {
-      cb(e)
-    })
-  }
+  // index.mutex.afterWrite(function () {
+  //   self.init(index.mutex.lev.createReadStream(opts))
+  // })
 }
 util.inherits(Query, BaseQuery)
-Query.prototype.init = function (stream) {
-  var self = this
-  stream.on('data', function (raw) {
-    self.count += 1
-    raw.rawkey = raw.key
-    raw.key = self.index.bytes.decode(raw.key)[1][0]
-    self.emit('row', raw)
-  })
-  stream.on('end', this.emit.bind(this, 'end'))
-}
 
-function Index (lev, name, map, opts) {
-  if (typeof lev === 'string') lev = levelup(lev, {keyEncoding:'binary', valueEncoding:'json'})
-  this.mutex = mutex(lev)
+function Index (name, map, opts) {
+  if (typeof opts.lev === 'string') opts.lev = levelup(opts.lev, {keyEncoding:'binary', valueEncoding:'json'})
+  this.mutex = mutex(opts.lev)
+  this.lev = opts.lev
   this.name = name
   this.map = map
   this.bytes = byteslice([name, 'level-mapreduce'])
   this.opts = opts || {}
-  if (!this.opts.id) this.opts.id = function (entry) { return entry.id }
+  // if (!this.opts.key) this.opts.key = function (entry) { return entry.key }
+  stream.Transform.call(this, {objectMode:true})
 }
-util.inherits(Index, events.EventEmitter)
+util.inherits(Index, stream.Transform)
+Index.prototype.createReadStream = function (opts) {
+  if (!opts.raw) {
+    if (opts.start) opts.start = self.bytes.encode(['index', opts.start])
+    if (opts.end) opts.end = self.bytes.encode(['index', opts.end])
+    if (!opts.start) opts.start = self.bytes.encode(['index'])
+    if (!opts.end) opts.end = self.bytes.encode(['index', {}])
+  }
+
+  return this.mutex.lev.createReadStream(opts)
+}
+
 Index.prototype.query = function (opts, cb) {
-  if (opts.start) {
-    opts.start = this.bytes.encode(['index', [opts.start]])
-  } else {
-    opts.start = this.bytes.encode(['index', null])
-  }
-  if (opts.end) {
-    opts.end = this.bytes.encode(['index', [opts.end]])
-  } else {
-    opts.end = this.bytes.encode(['index', {}])
-  }
-
-  if (opts.key) {
-    opts.start = this.bytes.encode(['index', [opts.key], null])
-    opts.end = this.bytes.encode(['index', [opts.key], {}])
-    delete opts.key
-  }
-
-  return new Query(this, opts, cb)
+  // return new Query(this, opts, cb)
 }
 Index.prototype.count = function (cb) {
-  var q = this.query({})
-    ;
-  q.on('end', function ( ){
-    cb(null, q.count)
-  })
-}
 
+}
 Index.prototype.get = function (key, opts, cb) {
+  var self = this
   if (!cb) {
     cb = opts
     opts = {}
   }
-  var self = this
-  // var query =
-  //   { start:
-  //   , end:
-  //   }
-  self.mutex.lev.createReadStream()
-}
-Index.prototype.write = function (entry, ref, tuples, cb) {
-  var self = this
-    , id = self.opts.id(entry)
+  cb = once(cb)
+  opts.raw = true
+  opts.start = self.bytes.encode(['index', key])
+  opts.end = self.bytes.encode(['index', key, {}])
+  var reader = self.createReadStream(opts)
+    , chunks = []
     ;
 
-  function saveseq () {
-    if (ref && entry.seq) self.mutex.put(self.bytes.encode(['seq', ref]), entry.seq, noop)
-  }
+  reader.on('data', function (chunk) {
+    chunks.push(chunk)
+  })
+  reader.on('error', cb)
+  reader.on('end', function () {
+    cb(null, chunks)
+  })
+}
+Index.prototype._transform = function (chunk, encoding, cb) {
+  var self = this
+  if (typeof chunk !== 'object') return cb() // someone piped us a not-object
 
-  function writeall () {
-    var inserts = tuples.map(function (t) { return [['index', [t[0]], uuid()], t[1]] })
+  if (!chunk.deleted && (!chunk.key || !chunk.value)) return cb() // not a valid format
 
-    inserts.forEach(function (i) {
-      self.mutex.put(self.bytes.encode(i[0]), i[1], noop)
-    })
-    saveseq()
-    self.mutex.put(self.bytes.encode(['id', id]), inserts.map(function (i) {return i[0]}), function (e) {
-      if (e) return cb(e)
-      cb(null, tuples)
-      self.emit('row', {id:id, remote:ref, data:tuples})
-    })
-  }
-
-  self.mutex.get(self.bytes.encode(['id', id]), function (e, oldwrites) {
-    if (e) oldwrites = []
-    oldwrites.forEach(function (key) {
-      self.mutex.del(self.bytes.encode(key), noop)
-    })
-    if (!entry.deleted) {
-      writeall()
-    } else {
-      saveseq()
-      self.mutex.del(self.bytes.encode(['id', id]), cb)
+  self.getMeta(chunk.key, function (e, meta) {
+    if (!e) {
+      meta.keys.forEach(function (key) {
+        self.mutex.del(key, noop)
+      })
+      if (chunk.deleted) {
+        self.mutex.del(meta.index, function (e) {
+          if (e) return cb(e)
+          if (self._piped) self.push({key:chunk.key, value:[]})
+          cb()
+        })
+        return
+      }
     }
-  })
-}
-Index.prototype.pull = function (url, cb) {
-  var s = sleepref.client(url, {include_data:true})
-  this._pull(s, url, cb)
-}
-Index.prototype._pull = function (sleeper, ref, cb) {
-  var self = this
-  sleeper.on('entry', function (entry) {
-    self.write(entry, ref, self.map(entry), function (e, tuples) {
-      if (e) return sleeper.end()
-    })
-  })
-  if (cb) sleeper.on('end', cb)
-}
-Index.prototype.from = function (getSequences, name, cb) {
-  var self = this
-  if (!cb) {
-    cb = name
-    name = null
-  }
 
-  function _do (seq) {
-    self._pull(getSequences({include_data:true, since:seq}), name, cb)
-  }
-  if (!name) {
-    _do(0)
-  } else {
-    self.mutex.get(self.bytes.encode(['seq', name]), function (e, seq) {
-      if (e) seq = 0
-      _do(seq)
+    // if deleted just finish up by removing the meta
+    if (chunk.deleted) {
+      self.mutex.del(meta.index, function (e) {
+        if (e) return cb(e)
+        if (self._piped) self.push({key:chunk.key, value:[]})
+        cb()
+      })
+      return
+    }
+
+    var mapped = self.map(chunk)
+
+    if (!mapped[0]) {
+      // if there is a meta we have to remove it
+      if (!e) self.mutex.del(meta.index, function (e) {
+        if (e) return cb(e)
+        if (self._piped) self.push({key:chunk.key, value:[]})
+        cb()
+      })
+      return
+    }
+
+    var meta = {keys:[]}
+    for (var i in mapped) {
+      var key = mapped[i][0]
+        , value = mapped[i][1]
+        , encoded = self.bytes.encode(['index', key, uuid()])
+        ;
+      meta.keys.push(encoded)
+      self.mutex.put(encoded, value, noop)
+    }
+
+    self.mutex.put(self.bytes.encode(['meta', chunk.key]), meta, function (e) {
+      if (e) return cb(e)
+      if (self._piped) self.push({key:chunk.key, value:mapped})
+      cb()
     })
-  }
+  })
 }
+Index.prototype.pipe = function () {
+  this._piped = true
+  stream.Transform.prototype.pipe.apply(this, arguments)
+}
+
+Index.prototype.getMeta = function (key, cb) {
+  var index = this.bytes.encode(['meta', key])
+  this.mutex.get(index, function (e, meta) {
+    // TODO: add conveniences
+    if (!meta) meta = {}
+    meta.index = index
+    return cb(e, meta)
+  })
+}
+
+// Index.prototype.write = function (entry, ref, tuples, cb) {
+// }
 
 function AsyncIndex () {
   Index.apply(this, arguments)
 }
 util.inherits(AsyncIndex, Index)
-AsyncIndex.prototype.from = function (nextSequence, name, cb) {
-  var self = this
-  if (!cb) {
-    cb = name
-    name = null
-  }
-
-  function _do (seq) {
-    nextSequence({include_data:true, since:seq}, function (e, entry) {
-      if (e) return cb(null)
-      self.map(entry, function (e, tuples) {
-        if (e) console.error(e)
-        self.write(entry, name, tuples, function (e) {
-          if (e) console.error(e)
-          _do(seq+1)
-        })
-      })
-    })
-  }
-  if (!name) {
-    _do(0)
-  } else {
-    self.mutex.get(self.bytes.encode(['seq', name]), function (e, seq) {
-      if (e) seq = 0
-      _do(seq)
-    })
-  }
-}
-
 
 module.exports = function (lev, name, map, opts) { return new Index(lev, name, map, opts) }
 module.exports.async = function (lev, name, map, opts) {return new AsyncIndex(lev, name, map, opts) }
