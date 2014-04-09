@@ -16,7 +16,6 @@
     "cleanup": "~0.3.0",
     "okdone": "~0.3.0",
     "rimraf": "~2.2.2",
-    "level-sleep": "~0.3.0",
     "tape": "^2.12.3"
   },
   "scripts": {
