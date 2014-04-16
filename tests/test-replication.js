@@ -13,11 +13,11 @@ var mapstore = require('../')
 tape('setup', function (t) {
   rimraf.sync(__dirname+'/test-replication.db')
   var map = function (obj) { return [['test', obj.value.test]] }
-  index = mapstore('testindex', map, {lev:__dirname+'/test-replication.db'})
+  index = mapstore(__dirname+'/test-replication.db', 'testindex', map)
 
   var mapSecondary = function (obj) { return [['test2', obj.value[0][1] ]] }
 
-  secondary = mapstore('secondaryindex', mapSecondary, {lev: index.lev})
+  secondary = mapstore(index.lev, 'secondaryindex', mapSecondary)
 
   index.pipe(secondary)
 
@@ -29,7 +29,7 @@ tape('write and get', function (t) {
     setTimeout(function () {
       secondary.get('test2', function (e, results) {
         t.equal(results.length, 1)
-        t.equal(results[0].value, 123)
+        t.equal(results[0], 123)
         t.end()
       })
     }, 10)
@@ -42,7 +42,7 @@ tape('overwrite', function (t) {
       setTimeout(function () {
         secondary.get('test2', function (e, results) {
           t.equal(results.length, 1)
-          t.equal(results[0].value, 345)
+          t.equal(results[0], 345)
           t.end()
         })
       }, 10)
