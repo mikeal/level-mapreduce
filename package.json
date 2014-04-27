@@ -1,6 +1,6 @@
 {
   "name": "level-mapreduce",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Stored map engine with query engine.",
   "main": "index.js",
   "dependencies": {
