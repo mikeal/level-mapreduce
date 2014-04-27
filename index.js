@@ -11,14 +11,20 @@ var events = require('events')
   ;
 
 function Query (cb) {
-  this.cb = cb
+  this.cb = once(cb)
   this.mutations = []
+  if (this.cb) {
+    this.results = []
+    this.on('error', cb)
+    console.log('cb')
+  }
   stream.Transform.call(this, {objectMode:true})
 }
 util.inherits(Query, stream.Transform)
 Query.prototype._transform = function (chunk, encoding, cb) {
   var self = this
   if (self.mutations.length === 0) {
+    if (self.cb) self.results.push(chunk)
     self.push(chunk)
     return cb()
   }
@@ -27,6 +33,7 @@ Query.prototype._transform = function (chunk, encoding, cb) {
     self.mutations[i](_chunk, function (e, rechunk) {
       if (e) return cb()
       if (i === (self.mutations.length - 1)) {
+        if (self.cb) self.results.push(rechunk)
         self.push(rechunk)
         return cb()
       }
@@ -75,12 +82,14 @@ Query.prototype.group = function (finish) {
     }
   })
   this.on('preend', function () {
+    console.error('preend')
     if (current) this.push({key:current, results:results})
   })
   return this
 }
 Query.prototype.end = function () {
   this.emit('preend')
+  if (this.cb) this.cb(null, this.results)
   stream.Transform.prototype.end.apply(this, arguments)
 }
 
@@ -95,6 +104,10 @@ DecodeStream.prototype._transform = function (chunk, encoding, cb) {
   this.push(chunk)
   cb()
 }
+DecodeStream.prototype.end = function () {
+  stream.Transform.prototype.end.apply(this, arguments)
+}
+
 
 function Index (lev, name, map, opts) {
   if (typeof lev === 'string') lev = levelup(lev, {keyEncoding:'binary', valueEncoding:'json'})
@@ -112,7 +125,11 @@ Index.prototype.createReadStream = function (opts) {
   if (!opts) opts = {}
   if (!opts.raw) {
     if (opts.start) opts.start = this.bytes.encode(['index', opts.start])
-    if (opts.end) opts.end = this.bytes.encode(['index', opts.end])
+    if (opts.end) opts.end = this.bytes.encode(['index', opts.start])
+    if (opts.key) {
+      opts.start = this.bytes.encode(['index', opts.key])
+      opts.end = this.bytes.encode(['index', opts.key, {}])
+    }
     if (!opts.start) opts.start = this.bytes.encode(['index'])
     if (!opts.end) opts.end = this.bytes.encode(['index', {}])
   }
@@ -121,7 +138,11 @@ Index.prototype.createReadStream = function (opts) {
 }
 
 Index.prototype.query = function (opts, cb) {
-  return this.createReadStream(opts).pipe(new Query())
+  var decode = this.createReadStream(opts)
+    , query = new Query(cb)
+    ;
+  decode.pipe(query)
+  return query
   // return new Query(this, opts, cb)
 }
 Index.prototype.count = function (opts, cb) {
@@ -154,7 +175,9 @@ Index.prototype._transform = function (chunk, encoding, cb) {
 
   if (typeof chunk !== 'object') return cb() // someone piped us a not-object
 
-  if (!chunk.deleted && (!chunk.key || !chunk.value)) return cb() // not a valid format
+  if (!chunk.deleted &&
+       (typeof chunk.key === 'undefined' || typeof chunk.value === 'undefined')
+     ) return cb() // not a valid format
 
   self.getMeta(chunk.key, function (e, meta) {
     if (!e) {
