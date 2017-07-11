@@ -5,18 +5,18 @@
   "main": "index.js",
   "dependencies": {
     "byteslice": "~0.2.0",
-    "level-mutex": "~0.6.0",
-    "levelup": "~0.15.0",
+    "level-mutex": "~0.7.0",
+    "levelup": "~1.3.8",
     "node-uuid": "~1.4.0",
     "couchup": "~0.8.0",
-    "leveldown": "~0.8.2",
+    "leveldown": "~1.7.2",
     "once": "^1.3.0"
   },
   "devDependencies": {
     "cleanup": "~0.3.0",
     "okdone": "~0.3.0",
-    "rimraf": "~2.2.2",
-    "tape": "^2.12.3"
+    "rimraf": "~2.6.1",
+    "tape": "^4.7.0"
   },
   "scripts": {
     "test": "tape tests/*.js"
